@@ -36,6 +36,19 @@ void main() {
       expect(a.quality.toJson()['min_window_coverage'], 0.8);
       expect(a.quality.toJson()['min_accepted_windows'], 6);
       expect(a.quality.toJson()['required_window_duration_sec'], 1800);
+      expect(a.detail.present, isTrue);
+      expect(a.detail.value!.rmssd, a.metric.value);
+      expect(a.detail.value!.windows, a.quality.acceptedWindows);
+      expect(a.detail.value!.minDiffsPerWindow, kMinDiffsPerRmssdWindow);
+      expect(a.detail.value!.rrCoverage, a.quality.rrCoverage!.coverage);
+      expect(a.quality.toJson()['min_diffs_per_window'], 20);
+      expect(a.quality.toJson()['rr_coverage_ceiling'], kRrCoverageCeiling);
+      expect(
+          sleepSessionRmssdDetail(s.rr, s.ts,
+                  startSec: _start, endSec: _start + 1800)
+              .value!
+              .toJson(),
+          a.detail.value!.toJson());
       expect(
           sleepSessionWindowedRmssd(s.rr, s.ts,
                   startSec: _start, endSec: _start + 1800)
@@ -49,6 +62,9 @@ void main() {
           startSec: _start, endSec: _start + 9000);
       expect(a.metric.present, isFalse);
       expect(a.metric.confidence, 0);
+      expect(a.detail.present, isFalse);
+      expect(a.detail.note, a.metric.note);
+      expect(a.quality.thinWindows, 30);
       expect(a.quality.totalWindows, 30);
       expect(a.quality.acceptedWindows, 0);
       expect(a.quality.rawBeats, 300);

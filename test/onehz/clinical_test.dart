@@ -1223,122 +1223,91 @@ void main() {
   });
 
   group('sleep-session nightly RMSSD (mean of cleaned 5-min windows)', () {
-    test('matches the arithmetic mean of per-window RMSSDs', () {
-      final rr = <double>[];
-      final ts = <double>[];
-      var beatTsMs = 0.0;
-
-      void addWindow(List<double> vals, double startTsMs) {
-        beatTsMs = startTsMs;
-        for (final v in vals) {
-          rr.add(v);
-          ts.add(beatTsMs);
-          beatTsMs += 1000.0;
+    // Six full windows, with timestamps preserved when beats are rejected or
+    // absent. These exercise the nightly measurement, not an ultra-short read.
+    ({List<double> rr, List<double> ts}) session(
+        double Function(int window, int beat) value,
+        {bool Function(int window, int beat)? skip}) {
+      final rr = <double>[], ts = <double>[];
+      for (var w = 0; w < 6; w++) {
+        for (var i = 0; i < 300; i++) {
+          if (skip?.call(w, i) == true) continue;
+          rr.add(value(w, i));
+          ts.add(1000.0 + (w * 300 + i) * 1000);
         }
       }
+      return (rr: rr, ts: ts);
+    }
 
-      // bucket 0: diffs 10,-20,10,10,-20 -> RMSSD sqrt(220)
-      addWindow([1000, 1010, 990, 1000, 1010, 990], 1000.0);
-      // bucket 1: diffs 50,-100,50,50,-100 -> RMSSD sqrt(5500)
-      addWindow([1000, 1050, 950, 1000, 1050, 950], 301000.0);
-
-      final m = sleepSessionWindowedRmssd(
-        rr,
-        ts,
-        startSec: 1,
-        endSec: 601,
-        windowSec: 300,
-      );
+    test('matches the arithmetic mean of qualifying per-window RMSSDs', () {
+      final s = session((w, i) =>
+          1000 + (w.isEven ? 10 : 50) * math.sin(2 * math.pi * i / 16));
+      var unitSquared = 0.0;
+      for (var i = 1; i < 300; i++) {
+        final d = math.sin(2 * math.pi * i / 16) -
+            math.sin(2 * math.pi * (i - 1) / 16);
+        unitSquared += d * d;
+      }
+      final m =
+          sleepSessionWindowedRmssd(s.rr, s.ts, startSec: 1, endSec: 1801);
       expect(m.present, isTrue);
-      expect(m.value,
-          closeTo((math.sqrt(220.0) + math.sqrt(5500.0)) / 2.0, 1e-6));
+      expect(m.value, closeTo(30 * math.sqrt(unitSquared / 299), 1e-9));
     });
 
-    test('a window with too few differences does not count', () {
-      // One window of +-10 ms alternation (RMSSD 10), plus a window holding a
-      // single 160 ms difference. Averaged in, that one difference would
-      // weigh as much as the whole real window.
-      final rr = <double>[
-        for (var i = 0; i < 10; i++) i.isEven ? 1000.0 : 1010.0,
-        900, 1060,
-      ];
-      final ts = <double>[
-        for (var i = 0; i < 10; i++) 1000.0 + i * 1000.0,
-        301000, 302000,
-      ];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 601);
-      expect(m.present, isTrue);
-      expect(m.value, closeTo(10.0, 1e-9));
+    test('a sparse window cannot count toward the nightly minimum', () {
+      final s = session((w, i) => 1000 + 10 * math.sin(i / 10),
+          skip: (w, i) => w == 5 && i >= 10);
+      final a = assessSleepSessionRmssd(s.rr, s.ts, startSec: 1, endSec: 1801);
+      expect(a.metric.present, isFalse);
+      expect(a.quality.acceptedWindows, 5);
+      expect(a.metric.note, contains('need_hrv_windows:have=5,need=6'));
     });
 
     test('drops out-of-range and Malik-style ectopic beats before RMSSD', () {
-      final rr = <double>[1000, 1000, 1000, 1000, 200, 1000, 1000, 1000];
-      final ts = <double>[for (var i = 0; i < 8; i++) 1000.0 + i * 1000.0];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      final s = session((w, i) => i == 150 ? 200 : 1000);
+      final m =
+          sleepSessionWindowedRmssd(s.rr, s.ts, startSec: 1, endSec: 1801);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9));
     });
 
     test('HRV-02: no difference is manufactured across a REJECTED beat', () {
-      // The window cleaner compacts, so differencing straight down its output
-      // spanned every rejected beat with one invented difference. Here the two
-      // sides of the ectopic sit 100 ms apart, so the seam Δ is 100 ms while
-      // every real Δ is 0. THIS is most of the "gen5 reads 2x gen4" gap: on the
-      // real corpus it inflated the nightly headline by 51-102 % on MG
-      // (87.7 -> 58.2, 82.9 -> 53.0, 76.9 -> 48.4 ms) and 2-13 % on gen4.
-      final rr = <double>[900, 900, 900, 900, 200, 1000, 1000, 1000];
-      final ts = <double>[for (var i = 0; i < 8; i++) 1000.0 + i * 1000.0];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      final s = session((w, i) => i < 150 ? 900 : (i == 150 ? 200 : 1000));
+      final m =
+          sleepSessionWindowedRmssd(s.rr, s.ts, startSec: 1, endSec: 1801);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9),
-          reason: '2 runs of flat beats, no seam difference');
+          reason: 'two flat runs per window, no seam difference');
     });
 
     test('HRV-02: the nightly headline is ABSENT on a jitter-dominated night',
         () {
-      // WHOOP 5 measures ACF1 -0.50/-0.51 on this series even after the
-      // window cleaner, so the headline 111.8 / 118.7 ms was noise. Absent
-      // beats plausible: readiness treats a null HRV driver as absent.
       final rnd = math.Random(11);
-      final rr = <double>[
-        for (var i = 0; i < 900; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
-      ];
-      final ts = <double>[for (var i = 0; i < 900; i++) 1000.0 + i * 1000.0];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 1801);
+      final s = session((w, i) => 1000 + (rnd.nextDouble() - 0.5) * 120);
+      final m =
+          sleepSessionWindowedRmssd(s.rr, s.ts, startSec: 1, endSec: 1801);
       expect(m.present, isFalse);
       expect(m.note, contains('rmssd_refused:acf1='));
     });
 
-    test(
-        'HRV-gap: no difference is manufactured across a real sensor dropout',
+    test('HRV-gap: no difference is manufactured across a real sensor dropout',
         () {
-      // Two flat runs of beats, individually passing the range/median filter,
-      // sitting on EITHER SIDE of a ~2 min skin-contact gap inside the same
-      // 5-min bucket. Both survive `_cleanWindowRuns`'s value-only filters and
-      // land back-to-back in the compacted survivor list, so without the
-      // timestamp gap check their genuinely-adjacent-in-time-but-not seam
-      // would be differenced as if the beats were 1 s apart.
-      final rr = <double>[900, 900, 900, 900, 1000, 1000, 1000];
-      final ts = <double>[
-        1000, 2000, 3000, 4000, // flat run before the gap
-        123000, 124000, 125000, // flat run after a ~2 min dropout
-      ];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      final s = session((w, i) => i < 150 ? 900 : 1000,
+          skip: (w, i) => i >= 140 && i < 160);
+      final m =
+          sleepSessionWindowedRmssd(s.rr, s.ts, startSec: 1, endSec: 1801);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9),
-          reason: 'two flat runs, no cross-gap difference manufactured');
+          reason:
+              'two flat runs with enough coverage, no cross-gap difference');
     });
 
-    test('HRV-gap: no gap means no change (control)', () {
-      // Same shape, but the second run starts right after the first (no real
-      // gap) — the fix must not shrink a window that has nothing to exclude.
-      final rr = <double>[900, 900, 900, 1000, 1000, 1000];
-      final ts = <double>[1000, 2000, 3000, 4000, 5000, 6000];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+    test('HRV-gap: a genuinely adjacent change remains in RMSSD', () {
+      final s = session((w, i) => i < 150 ? 900 : 1000);
+      final m =
+          sleepSessionWindowedRmssd(s.rr, s.ts, startSec: 1, endSec: 1801);
       expect(m.present, isTrue);
-      // One real seam difference (900 -> 1000 = 100 ms) survives; RMSSD = 100
-      // over that single difference (the rest are 0).
-      expect(m.value, closeTo(math.sqrt(100.0 * 100.0 / 5.0), 1e-6));
+      expect(m.value, closeTo(100 / math.sqrt(299), 1e-9));
     });
   });
 
